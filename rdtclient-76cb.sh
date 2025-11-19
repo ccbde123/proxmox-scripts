@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
+
+# Colors
+GN=$(printf '\033[32m')
+RD=$(printf '\033[31m')
+YW=$(printf '\033[33m')
+CL=$(printf '\033[m')
 
 echo -e "    ____  ____  _______________            __"
 echo -e "   / __ \\/ __ \\/_  __/ ____/ (_)__  ____  / /_"
@@ -7,96 +13,75 @@ echo -e "  / /_/ / / / / / / / /   / / / _ \\/ __ \\/ __/"
 echo -e " / _, _/ /_/ / / / / /___/ / /  __/ / / / /_  "
 echo -e "/_/ |_/_____/ /_/  \\____/_/_/\\___/_/ /_/\\__/  "
 echo
-echo " RDT-Client-76cb Proxmox Installer (AMD64)"
-echo
+echo -e "   ${GN}RDT-Client-76cb Proxmox Installer (AMD64)${CL}\n"
 
+# Architecture Check
 ARCH=$(dpkg --print-architecture)
 if [[ "$ARCH" != "amd64" ]]; then
-    echo "ERROR: Must run on AMD64"
+    echo -e "${RD}This script supports AMD64 only!${CL}"
     exit 1
 fi
+echo -e "${GN}✔ Architecture OK${CL}\n"
 
-echo "✔ Architecture OK"
-sleep 1
-
+# Config
 CTID=$(pvesh get /cluster/nextid)
-TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
-PORT="6500"
-PASSWORD="rdtclient"
-HOST_MEDIA="/mnt/media"
-CT_MEDIA="/mnt/media"
 STORAGE="local-lvm"
+TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
 
-echo
-echo "=> Preparing template..."
+echo -e "=> Preparing template..."
+pveam update >/dev/null
+pveam download local "$TEMPLATE" >/dev/null || true
 
-if ! pveam list local | awk '{print $2}' | grep -qx "$TEMPLATE"; then
-    pveam update
-    pveam download local "$TEMPLATE"
-fi
-
-echo
-echo "=> Creating container $CTID..."
-
+echo -e "\n=> Creating container $CTID..."
 pct create "$CTID" "local:vztmpl/$TEMPLATE" \
-    -hostname rdtclient \
-    -password "$PASSWORD" \
-    -cores 2 \
-    -memory 1024 \
-    -swap 256 \
-    -rootfs "$STORAGE:8" \
-    -unprivileged 1 \
-    -features nesting=1,fuse=1,keyctl=1 \
-    -net0 name=eth0,bridge=vmbr0,ip=dhcp
+  -hostname rdtclient \
+  -password "changeme" \
+  -unprivileged 1 \
+  -net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  -cores 2 \
+  -memory 1024 \
+  -features nesting=1 \
+  -storage "$STORAGE"
 
-if [[ -d "$HOST_MEDIA" ]]; then
-    pct set "$CTID" -mp0 "$HOST_MEDIA",mp="$CT_MEDIA"
-fi
-
-echo "=> Starting container..."
+echo -e "=> Starting container..."
 pct start "$CTID"
 sleep 5
 
-echo "=> Installing RDT-Client..."
-
+echo -e "=> Installing RDT-Client inside CT..."
 pct exec "$CTID" -- bash -c "
 apt update &&
 apt install -y unzip wget ca-certificates &&
 cd /opt &&
 wget -q https://github.com/rogerfar/rdt-client/releases/latest/download/rdt-client_linux-x64.zip &&
-unzip -qo rdt-client_linux-x64.zip -d rdt-client &&
-chmod +x /opt/rdt-client/RdtClient
+unzip -qo rdt-client_linux-x64.zip &&
+chmod +x RdtClient
 "
 
-echo "=> Creating systemd service..."
-
-pct exec "$CTID" -- bash -c "cat <<EOF >/etc/systemd/system/rdtclient.service
+echo -e "=> Creating systemd service..."
+pct exec "$CTID" -- bash -c "cat <<EOF > /etc/systemd/system/rdtclient.service
 [Unit]
 Description=RDT Client
 After=network.target
 
 [Service]
-WorkingDirectory=/opt/rdt-client
-ExecStart=/opt/rdt-client/RdtClient
-Environment=ASPNETCORE_URLS=http://0.0.0.0:${PORT}
+WorkingDirectory=/opt
+ExecStart=/opt/RdtClient
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF"
 
-systemctl daemon-reload
-systemctl enable --now rdtclient
-"
+pct exec "$CTID" -- systemctl daemon-reload
+pct exec "$CTID" -- systemctl enable --now rdtclient
 
 IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 
 echo
-echo "==============================================="
-echo " RDT-Client Installed"
-echo " CTID: $CTID"
-echo " URL:  http://${IP}:${PORT}"
-echo " Root Password: $PASSWORD"
-echo " Media Mount:   $HOST_MEDIA -> $CT_MEDIA"
-echo "==============================================="
+echo -e "${GN}✔ RDT-Client Installed Successfully!${CL}\n"
+echo -e "Access it at:  ${YW}http://$IP:6500${CL}"
+echo -e "CTID:          ${GN}$CTID${CL}"
+echo -e "Service:       ${GN}systemctl status rdtclient${CL}"
+echo
+echo -e "${GN}Done.${CL}"
 
