@@ -105,12 +105,7 @@ echo -e "  Media CT path:    ${GN}$MEDIA_CT_PATH${CL}"
 echo -e "  rdt-client port:  ${GN}$RDT_PORT${CL}"
 echo -e "  Root password:    ${GN}$ROOT_PASS${CL}\n"
 
-read -r -p "$(printf "${BL}Proceed with these settings? [Y/n]: ${CL}")" CONFIRM
-CONFIRM="${CONFIRM:-Y}"
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  echo -e "${RD}Aborted by user.${CL}"
-  exit 1
-fi
+echo -e "${BL}Proceeding automatically (non-interactive installer).${CL}"
 
 # -----------------------------
 # Ensure template exists
