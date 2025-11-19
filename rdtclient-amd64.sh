@@ -1,78 +1,182 @@
 #!/usr/bin/env bash
 # rdt-client AMD64 Proxmox Installer
+# Creates an LXC, installs rdt-client, and wires it up.
+# Architecture: amd64
 
-set -e
+set -euo pipefail
 
-# COLORS
-YW=$(echo "\033[33m")
-GN=$(echo "\033[32m")
-RD=$(echo "\033[31m")
-BL=$(echo "\033[36m")
-CL=$(echo "\033[m")
+# -----------------------------
+# Colors
+# -----------------------------
+YW="$(printf '\033[33m')"
+GN="$(printf '\033[32m')"
+RD="$(printf '\033[31m')"
+BL="$(printf '\033[36m')"
+CL="$(printf '\033[m')"
 
-# CHECK ARCH
-ARCH=$(dpkg --print-architecture)
+# -----------------------------
+# Logging
+# -----------------------------
+LOGFILE="/var/log/rdtclient-amd64-install.log"
+mkdir -p "$(dirname "$LOGFILE")"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+trap 'echo -e "\n${RD}ERROR: Script failed at line $LINENO. Check $LOGFILE for details.${CL}"' ERR
+
+# -----------------------------
+# Arch check
+# -----------------------------
+ARCH="$(dpkg --print-architecture)"
 if [[ "$ARCH" != "amd64" ]]; then
-    echo -e "${RD}ERROR: This installer is ONLY for AMD64/x86_64 systems.${CL}"
-    exit 1
+  echo -e "${RD}💡 This script is for AMD64/x86_64 only (Intel/AMD).${CL}"
+  echo -e "You are running: ${YW}$ARCH${CL}"
+  exit 1
 fi
 
-echo -e "${GN}✔ Detected AMD64 — proceeding...${CL}"
+clear
+echo -e "    ____  ____  _______________            __"
+echo -e "   / __ \\/ __ \\/_  __/ ____/ (_)__  ____  / /_"
+echo -e "  / /_/ / / / / / / / /   / / / _ \\/ __ \\/ __/"
+echo -e " / _, _/ /_/ / / / / /___/ / /  __/ / / / /_  "
+echo -e "/_/ |_/_____/ /_/  \\____/_/_/\\___/_/ /_/\\__/  "
+echo -e "                                              "
+echo -e "      ${GN}RDT-Client Proxmox Installer (AMD64)${CL}\n"
 
-# LXC CONFIGURATION
-CTID=${CTID:-210}
-HN=rdtclient
-TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
-STORAGE=${STORAGE:-local}
-MEMORY=1024
+echo -e "${GN}✔ Detected AMD64 — proceeding...${CL}\n"
 
-echo -e "${YW}Checking for required template...${CL}"
+# -----------------------------
+# Helpers
+# -----------------------------
+get_next_ctid() {
+  # Proxmox API helper
+  pvesh get /cluster/nextid
+}
 
-# Check template exists
-if ! pveam list $STORAGE | grep -q "$TEMPLATE"; then
-    echo -e "${RD}Template not found in storage: $STORAGE${CL}"
-    echo -e "${YW}Attempting to download $TEMPLATE ...${CL}"
-    pveam update
-
-    if pveam available | grep -q "$TEMPLATE"; then
-        pveam download $STORAGE $TEMPLATE
-        echo -e "${GN}✔ Template downloaded successfully${CL}"
-    else
-        echo -e "${RD}ERROR: Template $TEMPLATE cannot be found remotely.${CL}"
-        echo -e "${YW}Run: pveam available | grep ubuntu${CL}"
-        exit 1
+get_default_storage() {
+  # Prefer local-lvm if present, otherwise local, otherwise first with rootdir
+  if pvesm status | awk 'NR>1 {print $1}' | grep -qx "local-lvm"; then
+    echo "local-lvm"
+    return
+  fi
+  if pvesm status | awk 'NR>1 {print $1}' | grep -qx "local"; then
+    echo "local"
+    return
+  fi
+  # Fallback: first storage that supports rootdir
+  local s
+  for s in $(pvesm status | awk 'NR>1 {print $1}'); do
+    if pvesm config "$s" 2>/dev/null | grep -q "content .*rootdir"; then
+      echo "$s"
+      return
     fi
-else
-    echo -e "${GN}✔ Template found in storage${CL}"
+  done
+  # Last resort
+  echo "local"
+}
+
+random_password() {
+  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16
+}
+
+# -----------------------------
+# Defaults (overridable via env)
+# -----------------------------
+CTID="${CTID:-$(get_next_ctid)}"
+HN="${HN:-rdtclient}"
+MEMORY="${MEMORY:-1024}"          # MB
+STORAGE="${STORAGE:-$(get_default_storage)}"
+TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
+TEMPLATE="${TEMPLATE:-ubuntu-22.04-standard_22.04-1_amd64.tar.zst}"
+MEDIA_HOST_PATH="${MEDIA_HOST_PATH:-/mnt/media}"   # host path to bind-mount
+MEDIA_CT_PATH="${MEDIA_CT_PATH:-/mnt/media}"       # mountpoint inside container
+RDT_PORT="${RDT_PORT:-6500}"
+
+ROOT_PASS="${ROOT_PASS:-$(random_password)}"
+
+# -----------------------------
+# Summary / "menu"
+# -----------------------------
+echo -e "${YW}Planned configuration:${CL}"
+echo -e "  CTID:             ${GN}$CTID${CL}"
+echo -e "  Hostname:         ${GN}$HN${CL}"
+echo -e "  Memory:           ${GN}${MEMORY}MB${CL}"
+echo -e "  Rootfs storage:   ${GN}$STORAGE${CL}"
+echo -e "  Template storage: ${GN}$TEMPLATE_STORAGE${CL}"
+echo -e "  Template file:    ${GN}$TEMPLATE${CL}"
+echo -e "  Media host path:  ${GN}$MEDIA_HOST_PATH${CL}"
+echo -e "  Media CT path:    ${GN}$MEDIA_CT_PATH${CL}"
+echo -e "  rdt-client port:  ${GN}$RDT_PORT${CL}"
+echo -e "  Root password:    ${GN}$ROOT_PASS${CL}  ${YW}(will be set automatically)${CL}\n"
+
+read -r -p "$(printf "${BL}Proceed with these settings? [Y/n]: ${CL}")" CONFIRM
+CONFIRM="${CONFIRM:-Y}"
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+  echo -e "${RD}Aborted by user.${CL}"
+  exit 1
 fi
 
-echo -e "${YW}Creating Ubuntu 22.04 LXC ($CTID)...${CL}"
+# -----------------------------
+# Ensure template exists
+# -----------------------------
+echo -e "\n${YW}Checking for required template in ${TEMPLATE_STORAGE}...${CL}"
 
-pct create $CTID $STORAGE:vztmpl/$TEMPLATE \
-    -hostname $HN \
-    -password '' \
-    -memory $MEMORY \
-    -unprivileged 1 \
-    -features nesting=1,fuse=1,keyctl=1 \
-    -net0 name=eth0,bridge=vmbr0,ip=dhcp \
-    -storage $STORAGE
+if ! pveam list "$TEMPLATE_STORAGE" | awk '{print $2}' | grep -qx "$TEMPLATE"; then
+  echo -e "${YW}Template not found locally, attempting download...${CL}"
+  pveam update
+  if ! pveam available | awk '{print $2}' | grep -qx "$TEMPLATE"; then
+    echo -e "${RD}ERROR: Template $TEMPLATE not found in remote list.${CL}"
+    echo -e "${YW}Run: pveam available | grep ubuntu${CL}"
+    exit 1
+  fi
+  pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
+  echo -e "${GN}✔ Template downloaded into ${TEMPLATE_STORAGE}${CL}"
+else
+  echo -e "${GN}✔ Template already present in ${TEMPLATE_STORAGE}${CL}"
+fi
 
-pct start $CTID
+# -----------------------------
+# Create LXC
+# -----------------------------
+echo -e "\n${YW}Creating LXC CTID ${CTID} (${HN})...${CL}"
+
+pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/$TEMPLATE" \
+  -hostname "$HN" \
+  -password "$ROOT_PASS" \
+  -memory "$MEMORY" \
+  -unprivileged 1 \
+  -features nesting=1,fuse=1,keyctl=1 \
+  -net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  -storage "$STORAGE"
+
+# Optional media bind-mount
+if [[ -d "$MEDIA_HOST_PATH" ]]; then
+  echo -e "${YW}Adding bind-mount: ${MEDIA_HOST_PATH} -> ${MEDIA_CT_PATH}${CL}"
+  pct set "$CTID" -mp0 "$MEDIA_HOST_PATH",mp="$MEDIA_CT_PATH"
+else
+  echo -e "${RD}WARN: Media host path ${MEDIA_HOST_PATH} does not exist, skipping bind-mount.${CL}"
+fi
+
+echo -e "${YW}Starting container...${CL}"
+pct start "$CTID"
 sleep 5
 
-echo -e "${YW}Updating container packages...${CL}"
-pct exec $CTID -- bash -c "apt update && apt upgrade -y && apt install -y wget unzip"
+# -----------------------------
+# Inside CT: install deps + rdt-client
+# -----------------------------
+echo -e "${YW}Updating packages and installing dependencies in CT...${CL}"
+pct exec "$CTID" -- bash -c "apt update && apt upgrade -y && apt install -y wget unzip ca-certificates"
 
-echo -e "${YW}Downloading rdt-client (x64)...${CL}"
-pct exec $CTID -- bash -c "
-    cd /opt &&
-    wget -q https://github.com/rogerfar/rdt-client/releases/latest/download/rdt-client_linux-x64.zip &&
-    unzip -o rdt-client_linux-x64.zip -d rdt-client &&
-    chmod +x /opt/rdt-client/RdtClient
+echo -e "${YW}Downloading rdt-client (linux-x64) inside CT...${CL}"
+pct exec "$CTID" -- bash -c "
+  mkdir -p /opt &&
+  cd /opt &&
+  wget -q https://github.com/rogerfar/rdt-client/releases/latest/download/rdt-client_linux-x64.zip &&
+  unzip -o rdt-client_linux-x64.zip -d rdt-client &&
+  chmod +x /opt/rdt-client/RdtClient
 "
 
-echo -e "${YW}Creating systemd service...${CL}"
-pct exec $CTID -- bash -c "cat <<EOF > /etc/systemd/system/rdtclient.service
+echo -e "${YW}Creating systemd service for rdt-client...${CL}"
+pct exec "$CTID" -- bash -c "cat <<EOF > /etc/systemd/system/rdtclient.service
 [Unit]
 Description=RDT Client Service
 After=network.target
@@ -82,19 +186,32 @@ WorkingDirectory=/opt/rdt-client
 ExecStart=/opt/rdt-client/RdtClient
 Restart=always
 User=root
-Environment=ASPNETCORE_URLS=http://0.0.0.0:6500
+Environment=ASPNETCORE_URLS=http://0.0.0.0:${RDT_PORT}
 
 [Install]
 WantedBy=multi-user.target
 EOF"
 
-pct exec $CTID -- systemctl daemon-reload
-pct exec $CTID -- systemctl enable --now rdtclient
+pct exec "$CTID" -- systemctl daemon-reload
+pct exec "$CTID" -- systemctl enable --now rdtclient
 
-IP=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+# -----------------------------
+# Info dump
+# -----------------------------
+CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
 
-echo -e "${GN}✔ rdt-client successfully installed in LXC $CTID${CL}"
-echo -e ""
-echo -e "${BL}Access it at:${CL}  http://${IP}:6500"
-echo -e ""
-echo -e "${GN}Installation complete!${CL}"
+echo -e "\n${GN}✔ rdt-client successfully installed in LXC CTID ${CTID}${CL}\n"
+echo -e "${BL}Access URL:${CL}       http://${CT_IP}:${RDT_PORT}"
+echo -e "${BL}Container CTID:${CL}    ${GN}$CTID${CL}"
+echo -e "${BL}Hostname:${CL}         ${GN}$HN${CL}"
+echo -e "${BL}Root password:${CL}    ${GN}$ROOT_PASS${CL}"
+echo -e "${BL}Media mount (host):${CL} ${GN}$MEDIA_HOST_PATH${CL}"
+echo -e "${BL}Media mount (CT):${CL}   ${GN}$MEDIA_CT_PATH${CL}\n"
+
+echo -e "${YW}Next steps inside rdt-client UI:${CL}"
+echo -e "  1. Open the URL above."
+echo -e "  2. Set admin credentials."
+echo -e "  3. Add your Real-Debrid API key."
+echo -e "  4. Point download paths into ${MEDIA_CT_PATH} (e.g. ${MEDIA_CT_PATH}/downloads)."
+echo -e "\n${GN}Done.${CL}"
+
