@@ -13,40 +13,63 @@ CL=$(echo "\033[m")
 # CHECK ARCH
 ARCH=$(dpkg --print-architecture)
 if [[ "$ARCH" != "amd64" ]]; then
-    echo -e "${RD}ERROR: This installer is ONLY for AMD64 / x86_64 systems (Intel / AMD CPUs).${CL}"
+    echo -e "${RD}ERROR: This installer is ONLY for AMD64/x86_64 systems.${CL}"
     exit 1
 fi
 
 echo -e "${GN}✔ Detected AMD64 — proceeding...${CL}"
 
-# LXC SETTINGS
+# LXC CONFIGURATION
 CTID=${CTID:-210}
 HN=rdtclient
+TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+STORAGE=${STORAGE:-local}
 MEMORY=1024
-STORAGE=${STORAGE:-local-lvm}
-NET=${NET:-"dhcp"}
 
-echo -e "${YW}Creating Ubuntu 22.04 LXC...${CL}"
+echo -e "${YW}Checking for required template...${CL}"
 
-pct create $CTID local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst \
+# Check template exists
+if ! pveam list $STORAGE | grep -q "$TEMPLATE"; then
+    echo -e "${RD}Template not found in storage: $STORAGE${CL}"
+    echo -e "${YW}Attempting to download $TEMPLATE ...${CL}"
+    pveam update
+
+    if pveam available | grep -q "$TEMPLATE"; then
+        pveam download $STORAGE $TEMPLATE
+        echo -e "${GN}✔ Template downloaded successfully${CL}"
+    else
+        echo -e "${RD}ERROR: Template $TEMPLATE cannot be found remotely.${CL}"
+        echo -e "${YW}Run: pveam available | grep ubuntu${CL}"
+        exit 1
+    fi
+else
+    echo -e "${GN}✔ Template found in storage${CL}"
+fi
+
+echo -e "${YW}Creating Ubuntu 22.04 LXC ($CTID)...${CL}"
+
+pct create $CTID $STORAGE:vztmpl/$TEMPLATE \
     -hostname $HN \
     -password '' \
     -memory $MEMORY \
-    -net0 name=eth0,bridge=vmbr0,ip=$NET \
-    -features nesting=1,keyctl=1,fuse=1 \
     -unprivileged 1 \
+    -features nesting=1,fuse=1,keyctl=1 \
+    -net0 name=eth0,bridge=vmbr0,ip=dhcp \
     -storage $STORAGE
-
-echo -e "${GN}✔ LXC created.${CL}"
 
 pct start $CTID
 sleep 5
 
-echo -e "${YW}Updating LXC packages...${CL}"
+echo -e "${YW}Updating container packages...${CL}"
 pct exec $CTID -- bash -c "apt update && apt upgrade -y && apt install -y wget unzip"
 
-echo -e "${YW}Downloading rdt-client (AMD64 build)...${CL}"
-pct exec $CTID -- bash -c "cd /opt && wget -q https://github.com/rogerfar/rdt-client/releases/latest/download/rdt-client_linux-x64.zip && unzip rdt-client_linux-x64.zip -d rdt-client && chmod +x /opt/rdt-client/RdtClient"
+echo -e "${YW}Downloading rdt-client (x64)...${CL}"
+pct exec $CTID -- bash -c "
+    cd /opt &&
+    wget -q https://github.com/rogerfar/rdt-client/releases/latest/download/rdt-client_linux-x64.zip &&
+    unzip -o rdt-client_linux-x64.zip -d rdt-client &&
+    chmod +x /opt/rdt-client/RdtClient
+"
 
 echo -e "${YW}Creating systemd service...${CL}"
 pct exec $CTID -- bash -c "cat <<EOF > /etc/systemd/system/rdtclient.service
@@ -68,11 +91,10 @@ EOF"
 pct exec $CTID -- systemctl daemon-reload
 pct exec $CTID -- systemctl enable --now rdtclient
 
-IP=$(pct exec $CTID ip a show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+IP=$(pct exec $CTID -- hostname -I | awk '{print $1}')
 
-echo -e "${GN}✔ rdt-client successfully installed on LXC $CTID${CL}"
+echo -e "${GN}✔ rdt-client successfully installed in LXC $CTID${CL}"
 echo -e ""
-echo -e "${BL}Access URL:${CL}  http://${IP}:6500"
+echo -e "${BL}Access it at:${CL}  http://${IP}:6500"
 echo -e ""
-echo -e "${YW}Default login will be created on first launch inside the UI.${CL}"
-echo -e "${GN}Done!${CL}"
+echo -e "${GN}Installation complete!${CL}"
