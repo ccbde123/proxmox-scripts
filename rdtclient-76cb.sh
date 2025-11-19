@@ -1,27 +1,26 @@
 #!/usr/bin/env bash
-# Simple RDT-Client installer for AMD64 (Intel N100)
-# Mirrored settings from community-scripts ARM version
-
+# Simple and stable RDT-Client installer for AMD64 (Intel N100)
 set -e
 
 CTID=$(pvesh get /cluster/nextid)
 TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
 STORAGE="local-lvm"
-MEDIA_HOST="/mnt/media"
-MEDIA_CT="/mnt/media"
-RDT_PORT="6500"
+HOST_MEDIA="/mnt/media"
+CT_MEDIA="/mnt/media"
 PASSWORD="rdtclient"
+PORT="6500"
 
-echo "=== Installing RDT-Client on CT $CTID (AMD64) ==="
+echo "=== RDT-Client Installer for AMD64 (Intel N100) ==="
+echo "CTID: $CTID"
 
 # Ensure template exists
 if ! pveam list local | awk '{print $2}' | grep -qx "$TEMPLATE"; then
-    echo "Downloading template..."
+    echo "[+] Template missing. Downloading..."
     pveam update
     pveam download local "$TEMPLATE"
 fi
 
-# Create CT
+# Create container
 pct create "$CTID" "local:vztmpl/$TEMPLATE" \
     -hostname rdtclient \
     -password "$PASSWORD" \
@@ -31,19 +30,18 @@ pct create "$CTID" "local:vztmpl/$TEMPLATE" \
     -swap 256 \
     -rootfs "$STORAGE:8" \
     -features nesting=1,fuse=1,keyctl=1 \
-    -net0 name=eth0,bridge=vmbr0,ip=dhcp \
-    -ostype ubuntu
+    -net0 name=eth0,bridge=vmbr0,ip=dhcp
 
-# Bind mount
-if [[ -d "$MEDIA_HOST" ]]; then
-    pct set "$CTID" -mp0 "$MEDIA_HOST",mp="$MEDIA_CT"
+# Bind mount (if exists)
+if [[ -d "$HOST_MEDIA" ]]; then
+    pct set "$CTID" -mp0 "$HOST_MEDIA",mp="$CT_MEDIA"
 fi
 
-echo "Starting container..."
+echo "[+] Starting container..."
 pct start "$CTID"
 sleep 5
 
-echo "Installing RDT-Client inside CT..."
+echo "[+] Installing RDT-Client..."
 pct exec "$CTID" -- bash -c "
 apt update &&
 apt install -y unzip wget ca-certificates &&
@@ -53,7 +51,7 @@ unzip -qo rdt-client_linux-x64.zip -d rdt-client &&
 chmod +x /opt/rdt-client/RdtClient
 "
 
-echo "Creating service..."
+echo "[+] Creating systemd service..."
 pct exec "$CTID" -- bash -c "cat <<EOF >/etc/systemd/system/rdtclient.service
 [Unit]
 Description=RDT Client
@@ -62,9 +60,8 @@ After=network.target
 [Service]
 WorkingDirectory=/opt/rdt-client
 ExecStart=/opt/rdt-client/RdtClient
-Environment=ASPNETCORE_URLS=http://0.0.0.0:${RDT_PORT}
+Environment=ASPNETCORE_URLS=http://0.0.0.0:${PORT}
 Restart=always
-User=root
 
 [Install]
 WantedBy=multi-user.target
@@ -75,10 +72,11 @@ systemctl enable --now rdtclient
 
 IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 
-echo "===================================================="
-echo "✔ RDT-Client Installed (CTID $CTID)"
-echo "URL: http://${IP}:${RDT_PORT}"
-echo "Root password: $PASSWORD"
-echo "Mount: $MEDIA_HOST -> $MEDIA_CT"
-echo "===================================================="
+echo "==============================================="
+echo " RDT-Client Installed"
+echo " CTID: $CTID"
+echo " URL:  http://${IP}:${PORT}"
+echo " Root Password: $PASSWORD"
+echo " Media mount: $HOST_MEDIA -> $CT_MEDIA"
+echo "==============================================="
 
