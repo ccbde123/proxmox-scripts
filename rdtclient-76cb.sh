@@ -1,17 +1,42 @@
 #!/usr/bin/env bash
 # RDT-Client-76cb Installer for Proxmox (AMD64)
-# Full interactive whiptail UI installer
+# FULLY FIXED VERSION – whiptail UI + correct storage handling + proper template logic
 
 set -euo pipefail
 
-# -------------------------
-# Colors
-# -------------------------
-YW="$(printf '\033[33m')"
-GN="$(printf '\033[32m')"
-RD="$(printf '\033[31m')"
-BL="$(printf '\033[36m')"
-CL="$(printf '\033[m')"
+############################################
+# COLORS
+############################################
+YW="\033[33m"
+GN="\033[32m"
+RD="\033[31m"
+BL="\033[36m"
+CL="\033[m"
+
+############################################
+# LOGGING
+############################################
+LOGFILE="/var/log/rdtclient-76cb-install.log"
+mkdir -p /var/log
+exec > >(tee -a "$LOGFILE") 2>&1
+trap 'echo -e "\n${RD}ERROR at line $LINENO — see $LOGFILE${CL}"' ERR
+
+############################################
+# ARCH CHECK
+############################################
+ARCH="$(dpkg --print-architecture)"
+if [[ "$ARCH" != "amd64" ]]; then
+  echo -e "${RD}This installer is for AMD64 only.${CL}"
+  exit 1
+fi
+
+############################################
+# REQUIRE WHIPTAIL
+############################################
+command -v whiptail >/dev/null 2>&1 || {
+  echo -e "${YW}Installing whiptail...${CL}"
+  apt update && apt install -y whiptail
+}
 
 clear
 echo -e "    ____  ____  _______________            __"
@@ -20,146 +45,168 @@ echo -e "  / /_/ / / / / / / / /   / / / _ \\/ __ \\/ __/"
 echo -e " / _, _/ /_/ / / / / /___/ / /  __/ / / / /_  "
 echo -e "/_/ |_/_____/ /_/  \\____/_/_/\\___/_/ /_/\\__/  "
 echo -e "                                              "
-echo -e "      ${GN}RDT-Client-76cb Proxmox Installer (AMD64)${CL}\n"
-echo -e "${GN}✔ Architecture OK — AMD64 detected${CL}\n"
+echo -e "   ${GN}RDT-Client-76cb Proxmox Installer (AMD64)${CL}\n"
+echo -e "${GN}✔ Architecture OK${CL}\n"
 
-command -v whiptail >/dev/null 2>&1 || { echo -e "${RD}Whiptail missing. Install: apt install whiptail${CL}" ; exit 1; }
 
-# -------------------------
-# Functions
-# -------------------------
-
-get_storages() {
-  mapfile -t STORES < <(
-    for s in $(pvesm status | awk 'NR>1 {print $1}'); do
-        if pvesm config "$s" 2>/dev/null | grep -q "content .*rootdir"; then
-            echo "$s"
+############################################
+# STORAGE HELPER FUNCTION
+############################################
+select_storage() {
+    local options=()
+    while read -r store; do
+        if pvesm config "$store" 2>/dev/null | grep -q "content.*rootdir"; then
+            options+=("$store" "$store" "OFF")
         fi
-    done
-  )
-}
+    done < <(pvesm status | awk 'NR>1{print $1}')
 
-best_storage() {
-  if printf '%s\n' "${STORES[@]}" | grep -qx "local-lvm"; then echo "local-lvm"; return; fi
-  if printf '%s\n' "${STORES[@]}" | grep -qx "local"; then echo "local"; return; fi
-  echo "${STORES[0]}"
-}
-
-pick_storage() {
-  local items=()
-  for s in "${STORES[@]}"; do
-    if [[ "$s" == "$DEFAULT_STORAGE" ]]; then
-      items+=("$s" "$s storage" "ON")
-    else
-      items+=("$s" "$s storage" "OFF")
+    if [[ ${#options[@]} -eq 0 ]]; then
+        whiptail --msgbox "No valid storages detected that support container rootfs." 10 60
+        exit 1
     fi
-  done
 
-  whiptail --title "RDT-Client-76cb Installer" \
-    --radiolist "Select storage for CT root filesystem:" 20 70 10 \
-    "${items[@]}" \
-    3>&1 1>&2 2>&3
+    local choice
+    choice=$(whiptail --title "RDT-Client-76cb Installer" \
+                      --radiolist "Select rootfs storage:" \
+                      20 70 10 \
+                      "${options[@]}" \
+                      3>&1 1>&2 2>&3)
+
+    if [[ -z "$choice" ]]; then
+        echo -e "${RD}No storage selected.${CL}"
+        exit 1
+    fi
+
+    echo "$choice"
 }
 
-# -------------------------
-# Interactive UI
-# -------------------------
+############################################
+# TEMPLATE HELPER FUNCTION
+############################################
+select_template() {
+    local options=(
+      "ubuntu-22.04-standard_22.04-1_amd64.tar.zst" "Ubuntu 22.04 LTS" "ON"
+      "ubuntu-24.04-standard_24.04-2_amd64.tar.zst" "Ubuntu 24.04 LTS" "OFF"
+    )
 
-# CTID
-CTID=$(whiptail --inputbox "Enter CTID:" 10 60 "$(pvesh get /cluster/nextid)" \
-  3>&1 1>&2 2>&3)
+    local choice
+    choice=$(whiptail --title "RDT-Client-76cb Installer" \
+                      --radiolist "Select template:" \
+                      20 70 10 \
+                      "${options[@]}" \
+                      3>&1 1>&2 2>&3)
 
-# Hostname
-HN=$(whiptail --inputbox "Hostname for container:" 10 60 "rdtclient-76cb" \
-  3>&1 1>&2 2>&3)
+    echo "$choice"
+}
 
-# CPU cores
-CORES=$(whiptail --inputbox "CPU cores:" 10 60 "2" \
-  3>&1 1>&2 2>&3)
+############################################
+# INTERACTIVE UI
+############################################
 
-# RAM
-MEMORY=$(whiptail --inputbox "Memory (MB):" 10 60 "1024" \
-  3>&1 1>&2 2>&3)
+CTID=$(whiptail --inputbox "Enter CTID:" 10 60 "$(pvesh get /cluster/nextid)" 3>&1 1>&2 2>&3)
+HN=$(whiptail --inputbox "Hostname:" 10 60 "rdtclient-76cb" 3>&1 1>&2 2>&3)
+CORES=$(whiptail --inputbox "CPU Cores:" 10 60 "2" 3>&1 1>&2 2>&3)
+MEMORY=$(whiptail --inputbox "Memory (MB):" 10 60 "1024" 3>&1 1>&2 2>&3)
+SWAP=$(whiptail --inputbox "Swap (MB):" 10 60 "512" 3>&1 1>&2 2>&3)
 
-# SWAP
-SWAP=$(whiptail --inputbox "Swap (MB):" 10 60 "512" \
-  3>&1 1>&2 2>&3)
+############################################
+# STORAGE SELECT
+############################################
+STORAGE=$(select_storage)
 
-# Network mode
+############################################
+# NETWORK
+############################################
 NET=$(whiptail --title "Network Mode" --radiolist \
-"Choose networking mode:" 20 60 4 \
+"Select networking mode:" 15 60 3 \
 "dhcp" "DHCP (recommended)" ON \
 "static" "Static IP" OFF \
-"bridge" "Bridge only" OFF \
 3>&1 1>&2 2>&3)
 
 if [[ "$NET" == "static" ]]; then
-  IPADDR=$(whiptail --inputbox "Enter static IP (CIDR):" 10 60 "192.168.1.50/24" 3>&1 1>&2 2>&3)
-  GW=$(whiptail --inputbox "Gateway:" 10 60 "192.168.1.1" 3>&1 1>&2 2>&3)
+    IPADDR=$(whiptail --inputbox "Static IP (CIDR):" 10 60 "192.168.1.50/24" 3>&1 1>&2 2>&3)
+    GW=$(whiptail --inputbox "Gateway:" 10 60 "192.168.1.1" 3>&1 1>&2 2>&3)
+    NETCONF="ip=$IPADDR,gw=$GW"
 else
-  IPADDR="dhcp"
+    NETCONF="ip=dhcp"
 fi
 
-# Storage selection
-get_storages
-DEFAULT_STORAGE=$(best_storage)
-STORAGE=$(pick_storage)
+############################################
+# TEMPLATE
+############################################
+TEMPLATE=$(select_template)
 
-# Template selection
-TEMPLATE=$(whiptail --title "Template" --radiolist \
-"Choose Ubuntu template:" 20 70 10 \
-"ubuntu-22.04-standard_22.04-1_amd64.tar.zst" "Ubuntu 22.04 LTS" ON \
-"ubuntu-24.04-standard_24.04-2_amd64.tar.zst" "Ubuntu 24.04 LTS" OFF \
-3>&1 1>&2 2>&3)
+############################################
+# MEDIA PATHS
+############################################
+MEDIA_HOST=$(whiptail --inputbox "Host media path:" 10 60 "/mnt/media" 3>&1 1>&2 2>&3)
+MEDIA_CT=$(whiptail --inputbox "CT media mount path:" 10 60 "/mnt/media" 3>&1 1>&2 2>&3)
 
-# Media mount
-MEDIA_HOST_PATH=$(whiptail --inputbox "Host media path:" 10 60 "/mnt/media" 3>&1 1>&2 2>&3)
-MEDIA_CT_PATH=$(whiptail --inputbox "Container media path:" 10 60 "/mnt/media" 3>&1 1>&2 2>&3)
+############################################
+# PORT
+############################################
+RDT_PORT=$(whiptail --inputbox "RDT-Client Port:" 10 60 "6500" 3>&1 1>&2 2>&3)
 
-# RDT port
-RDT_PORT=$(whiptail --inputbox "RDT-Client port:" 10 60 "6500" 3>&1 1>&2 2>&3)
-
-# Root password
+############################################
+# PASSWORD
+############################################
 while true; do
-  PASS1=$(whiptail --passwordbox "Enter ROOT password:" 10 60 3>&1 1>&2 2>&3)
-  PASS2=$(whiptail --passwordbox "Confirm password:" 10 60 3>&1 1>&2 2>&3)
-  if [[ "$PASS1" == "$PASS2" && -n "$PASS1" ]]; then
-    ROOT_PASS="$PASS1"
-    break
-  else
-    whiptail --msgbox "Passwords do not match. Try again." 10 40
-  fi
+    PASS1=$(whiptail --passwordbox "ROOT password:" 10 60 3>&1 1>&2 2>&3)
+    PASS2=$(whiptail --passwordbox "Confirm password:" 10 60 3>&1 1>&2 2>&3)
+    [[ "$PASS1" == "$PASS2" && -n "$PASS1" ]] && break
+    whiptail --msgbox "Passwords do not match!" 10 40
 done
 
-# -------------------------
-# Download template
-# -------------------------
+############################################
+# SUMMARY
+############################################
+SUMMARY=$(cat <<EOF
+CTID:           $CTID
+Hostname:       $HN
+Cores:          $CORES
+Memory:         $MEMORY MB
+Swap:           $SWAP MB
+Storage:        $STORAGE
+Template:       $TEMPLATE
+Network:        $NETCONF
+Media Host:     $MEDIA_HOST
+Media CT:       $MEDIA_CT
+Port:           $RDT_PORT
+EOF
+)
+
+whiptail --yesno "$SUMMARY\n\nProceed with install?" 20 70 || exit 1
+
+
+############################################
+# TEMPLATE DOWNLOAD
+############################################
 if ! pveam list local | awk '{print $2}' | grep -qx "$TEMPLATE"; then
-  pveam update
-  pveam download local "$TEMPLATE"
+    pveam update
+    pveam download local "$TEMPLATE"
 fi
 
-# -------------------------
-# Create container
-# -------------------------
+############################################
+# CREATE CT
+############################################
 pct create "$CTID" "local:vztmpl/$TEMPLATE" \
   -hostname "$HN" \
-  -password "$ROOT_PASS" \
+  -password "$PASS1" \
   -cores "$CORES" \
   -memory "$MEMORY" \
   -swap "$SWAP" \
   -rootfs "$STORAGE:8" \
   -features nesting=1,fuse=1 \
-  -net0 "name=eth0,bridge=vmbr0,ip=$IPADDR"
+  -net0 "name=eth0,bridge=vmbr0,$NETCONF"
 
-pct set "$CTID" -mp0 "$MEDIA_HOST_PATH",mp="$MEDIA_CT_PATH"
+pct set "$CTID" -mp0 "$MEDIA_HOST",mp="$MEDIA_CT"
 
 pct start "$CTID"
-sleep 4
+sleep 3
 
-# -------------------------
-# Install rdt-client
-# -------------------------
+############################################
+# INSTALL RDT-CLIENT
+############################################
 pct exec "$CTID" -- bash -c "
 apt update &&
 apt install -y unzip wget ca-certificates &&
@@ -171,7 +218,7 @@ chmod +x /opt/rdt-client/RdtClient
 
 pct exec "$CTID" -- bash -c "cat <<EOF > /etc/systemd/system/rdtclient.service
 [Unit]
-Description=RDT Client
+Description=RDT Client Service
 After=network.target
 
 [Service]
@@ -179,7 +226,6 @@ WorkingDirectory=/opt/rdt-client
 ExecStart=/opt/rdt-client/RdtClient
 Environment=ASPNETCORE_URLS=http://0.0.0.0:${RDT_PORT}
 Restart=always
-User=root
 
 [Install]
 WantedBy=multi-user.target
@@ -188,21 +234,10 @@ EOF"
 pct exec "$CTID" -- systemctl daemon-reload
 pct exec "$CTID" -- systemctl enable --now rdtclient
 
-# -------------------------
-# Finish
-# -------------------------
+############################################
+# DONE
+############################################
+CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
 
-IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
-
-whiptail --title "RDT-Client Installed!" --msgbox \
-"Installation complete!
-
-Access rdt-client at:
-http://${IP}:${RDT_PORT}
-
-CTID: $CTID
-Hostname: $HN
-Root password: (what you entered)
-
-Media Path: $MEDIA_CT_PATH
-" 20 70
+whiptail --msgbox "RDT-Client installed!\n\nURL:\nhttp://${CT_IP}:${RDT_PORT}" 15 70
+echo -e "${GN}Installation complete.${CL}"
