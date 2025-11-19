@@ -48,12 +48,10 @@ echo -e "${GN}✔ Detected AMD64 — proceeding...${CL}\n"
 # Helpers
 # -----------------------------
 get_next_ctid() {
-  # Proxmox API helper
   pvesh get /cluster/nextid
 }
 
 get_default_storage() {
-  # Prefer local-lvm if present, otherwise local, otherwise first with rootdir
   if pvesm status | awk 'NR>1 {print $1}' | grep -qx "local-lvm"; then
     echo "local-lvm"
     return
@@ -62,20 +60,19 @@ get_default_storage() {
     echo "local"
     return
   fi
-  # Fallback: first storage that supports rootdir
-  local s
   for s in $(pvesm status | awk 'NR>1 {print $1}'); do
     if pvesm config "$s" 2>/dev/null | grep -q "content .*rootdir"; then
       echo "$s"
       return
     fi
   done
-  # Last resort
   echo "local"
 }
 
+# FIXED FUNCTION — stops line 94 crash
 random_password() {
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16
+  pw="$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || true)"
+  printf '%s' "${pw:-ChangeMe123!}"
 }
 
 # -----------------------------
@@ -83,12 +80,12 @@ random_password() {
 # -----------------------------
 CTID="${CTID:-$(get_next_ctid)}"
 HN="${HN:-rdtclient}"
-MEMORY="${MEMORY:-1024}"          # MB
+MEMORY="${MEMORY:-1024}"
 STORAGE="${STORAGE:-$(get_default_storage)}"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
 TEMPLATE="${TEMPLATE:-ubuntu-22.04-standard_22.04-1_amd64.tar.zst}"
-MEDIA_HOST_PATH="${MEDIA_HOST_PATH:-/mnt/media}"   # host path to bind-mount
-MEDIA_CT_PATH="${MEDIA_CT_PATH:-/mnt/media}"       # mountpoint inside container
+MEDIA_HOST_PATH="${MEDIA_HOST_PATH:-/mnt/media}"
+MEDIA_CT_PATH="${MEDIA_CT_PATH:-/mnt/media}"
 RDT_PORT="${RDT_PORT:-6500}"
 
 ROOT_PASS="${ROOT_PASS:-$(random_password)}"
@@ -106,7 +103,7 @@ echo -e "  Template file:    ${GN}$TEMPLATE${CL}"
 echo -e "  Media host path:  ${GN}$MEDIA_HOST_PATH${CL}"
 echo -e "  Media CT path:    ${GN}$MEDIA_CT_PATH${CL}"
 echo -e "  rdt-client port:  ${GN}$RDT_PORT${CL}"
-echo -e "  Root password:    ${GN}$ROOT_PASS${CL}  ${YW}(will be set automatically)${CL}\n"
+echo -e "  Root password:    ${GN}$ROOT_PASS${CL}\n"
 
 read -r -p "$(printf "${BL}Proceed with these settings? [Y/n]: ${CL}")" CONFIRM
 CONFIRM="${CONFIRM:-Y}"
@@ -148,7 +145,6 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/$TEMPLATE" \
   -net0 name=eth0,bridge=vmbr0,ip=dhcp \
   -storage "$STORAGE"
 
-# Optional media bind-mount
 if [[ -d "$MEDIA_HOST_PATH" ]]; then
   echo -e "${YW}Adding bind-mount: ${MEDIA_HOST_PATH} -> ${MEDIA_CT_PATH}${CL}"
   pct set "$CTID" -mp0 "$MEDIA_HOST_PATH",mp="$MEDIA_CT_PATH"
@@ -166,7 +162,7 @@ sleep 5
 echo -e "${YW}Updating packages and installing dependencies in CT...${CL}"
 pct exec "$CTID" -- bash -c "apt update && apt upgrade -y && apt install -y wget unzip ca-certificates"
 
-echo -e "${YW}Downloading rdt-client (linux-x64) inside CT...${CL}"
+echo -e "${YW}Downloading rdt-client inside CT...${CL}"
 pct exec "$CTID" -- bash -c "
   mkdir -p /opt &&
   cd /opt &&
@@ -175,7 +171,7 @@ pct exec "$CTID" -- bash -c "
   chmod +x /opt/rdt-client/RdtClient
 "
 
-echo -e "${YW}Creating systemd service for rdt-client...${CL}"
+echo -e "${YW}Creating systemd service...${CL}"
 pct exec "$CTID" -- bash -c "cat <<EOF > /etc/systemd/system/rdtclient.service
 [Unit]
 Description=RDT Client Service
@@ -195,9 +191,6 @@ EOF"
 pct exec "$CTID" -- systemctl daemon-reload
 pct exec "$CTID" -- systemctl enable --now rdtclient
 
-# -----------------------------
-# Info dump
-# -----------------------------
 CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
 
 echo -e "\n${GN}✔ rdt-client successfully installed in LXC CTID ${CTID}${CL}\n"
@@ -212,6 +205,5 @@ echo -e "${YW}Next steps inside rdt-client UI:${CL}"
 echo -e "  1. Open the URL above."
 echo -e "  2. Set admin credentials."
 echo -e "  3. Add your Real-Debrid API key."
-echo -e "  4. Point download paths into ${MEDIA_CT_PATH} (e.g. ${MEDIA_CT_PATH}/downloads)."
+echo -e "  4. Set download path to: ${MEDIA_CT_PATH}/downloads"
 echo -e "\n${GN}Done.${CL}"
-
